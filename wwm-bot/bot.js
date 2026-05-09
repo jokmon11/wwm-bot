@@ -25,12 +25,22 @@ function getWeekKey() {
   return `${now.getFullYear()}-W${week}`;
 }
 
-function checkAndResetWeek(data) {
+async function checkAndResetWeek(data, channel) {
   const cur = getWeekKey();
   if (data.weekKey !== cur) {
     data.weekKey = cur;
     data.weekTokens = {};
     saveData(data);
+    // แจ้งเตือนใน Discord ถ้ามี channel
+    if (channel) {
+      const embed = new EmbedBuilder()
+        .setColor(0x3bc48d)
+        .setTitle('🔄 รีเซ็ต Token ประจำสัปดาห์!')
+        .setDescription('สัปดาห์ใหม่เริ่มแล้ว! ทุกคนได้รับ **7 Token** สำหรับสัปดาห์นี้\n\n🪙 Token จะถูกหักเมื่อ **บันทึกผล Run สำเร็จ** เท่านั้น\n🔄 รีเซ็ตใหม่ทุกวันจันทร์')
+        .setFooter({ text: `สัปดาห์ ${cur}` })
+        .setTimestamp();
+      await channel.send({ embeds: [embed] }).catch(() => {});
+    }
   }
   return data;
 }
@@ -129,7 +139,7 @@ client.on('messageCreate', async (message) => {
 
   const [cmd, ...args] = content.slice(1).split(' ');
   let data = loadData();
-  data = checkAndResetWeek(data);
+  data = await checkAndResetWeek(data, message.channel);
 
   // !create <party:5|10> <target:MM:SS> <date:YYYY-MM-DD> [note]
   if (cmd === 'create') {
@@ -150,8 +160,6 @@ client.on('messageCreate', async (message) => {
 
     const note = args.slice(3).join(' ');
     const name = message.author.username;
-    const usedTokens = data.weekTokens[name] || 0;
-    if (usedTokens >= 7) return message.reply(`❌ **${name}** Token หมดสัปดาห์นี้แล้ว (7/7)`);
 
     const id = Date.now().toString().slice(-5);
     const ticket = {
@@ -163,12 +171,11 @@ client.on('messageCreate', async (message) => {
     };
 
     data.tickets.push(ticket);
-    data.weekTokens[name] = usedTokens + 1;
     saveData(data);
 
     const embed = ticketEmbed(ticket);
     const row = ticketButtons(ticket);
-    const msg = await message.channel.send({ content: `✅ **${name}** สร้าง Ticket สำเร็จ! Token เหลือ ${7 - data.weekTokens[name]}/7`, embeds: [embed], components: row ? [row] : [] });
+    const msg = await message.channel.send({ content: `✅ **${name}** สร้าง Ticket สำเร็จ!`, embeds: [embed], components: row ? [row] : [] });
 
     // Store message ID for later update
     data.tickets[data.tickets.length - 1].messageId = msg.id;
@@ -215,7 +222,7 @@ client.on('messageCreate', async (message) => {
         { name: '`!tokens`', value: 'ดู Token คงเหลือของทุกคนสัปดาห์นี้' },
         { name: 'ปุ่มใต้ Ticket', value: '**+ เข้าร่วม** → เลือกอาชีพแล้วเข้า party\n**🏁 บันทึกผล** → ใส่เวลาและแนบรูป screenshot\n**✕ ปิด** → ปิด Ticket' },
       )
-      .setFooter({ text: 'Token รีใหม่ทุกต้นสัปดาห์ · แต่ละคนได้ 7 token/สัปดาห์' });
+      .setFooter({ text: 'Token หักเมื่อบันทึกผล Run · รีเซ็ตทุกวันจันทร์ · แต่ละคนได้ 7 token/สัปดาห์' });
     return message.channel.send({ embeds: [embed] });
   }
 });
@@ -223,7 +230,7 @@ client.on('messageCreate', async (message) => {
 // ===== BUTTON & MODAL INTERACTIONS =====
 client.on('interactionCreate', async (interaction) => {
   let data = loadData();
-  data = checkAndResetWeek(data);
+  data = await checkAndResetWeek(data, null);
 
   // ---- BUTTONS ----
   if (interaction.isButton()) {
@@ -235,8 +242,6 @@ client.on('interactionCreate', async (interaction) => {
     if (action === 'join') {
       if (ticket.status === 'completed' || ticket.status === 'closed') return interaction.reply({ content: '❌ Ticket นี้ปิดแล้ว', ephemeral: true });
       const name = interaction.user.username;
-      const usedTokens = data.weekTokens[name] || 0;
-      if (usedTokens >= 7) return interaction.reply({ content: `❌ Token ของคุณหมดสัปดาห์นี้แล้ว (7/7)`, ephemeral: true });
       if (ticket.members.some(m => m.userId === interaction.user.id)) return interaction.reply({ content: '❌ คุณอยู่ใน party นี้แล้ว', ephemeral: true });
       if (ticket.members.length >= ticket.partySize) return interaction.reply({ content: '❌ Party เต็มแล้ว', ephemeral: true });
 
@@ -296,11 +301,10 @@ client.on('interactionCreate', async (interaction) => {
     const name = interaction.user.username;
 
     ticket.members.push({ name, cls, userId: interaction.user.id });
-    data.weekTokens[name] = (data.weekTokens[name] || 0) + 1;
     if (ticket.members.length >= ticket.partySize) ticket.status = 'full';
     saveData(data);
 
-    await interaction.update({ content: `✅ **${name}** เข้าร่วม party ในฐานะ ${CLASS_ICONS[cls]} ${cls} แล้ว! Token เหลือ ${7 - data.weekTokens[name]}/7`, components: [] });
+    await interaction.update({ content: `✅ **${name}** เข้าร่วม party ในฐานะ ${CLASS_ICONS[cls]} ${cls} แล้ว!`, components: [] });
 
     // Update original ticket message
     if (ticket.channelId && ticket.messageId) {
@@ -343,7 +347,20 @@ client.on('interactionCreate', async (interaction) => {
     };
     data.results.push(result);
     ticket.status = 'completed';
+
+    // หัก Token ทุกคนใน party เมื่อ run สำเร็จ
+    const members = ticket.members || [];
+    for (const m of members) {
+      data.weekTokens[m.name] = (data.weekTokens[m.name] || 0) + 1;
+    }
     saveData(data);
+
+    // สร้าง token summary
+    const tokenSummary = members.map(m => {
+      const used = data.weekTokens[m.name] || 0;
+      const left = Math.max(0, 7 - used);
+      return `${CLASS_ICONS[m.cls]} **${m.name}** — เหลือ ${left}/7`;
+    }).join('\n');
 
     const embed = new EmbedBuilder()
       .setColor(beat ? 0x3bc48d : 0xe05c5c)
@@ -353,6 +370,8 @@ client.on('interactionCreate', async (interaction) => {
         { name: '⏱️ เวลาจริง', value: `\`${formatTime(mins, secs)}\``, inline: true },
         { name: '🎯 เวลาเป้า', value: `\`${formatTime(ticket.targetMins, ticket.targetSecs)}\``, inline: true },
         { name: '📊 ผล', value: beat ? '**ทำได้ตามเป้า!** 🎉' : 'ยังไม่ถึงเป้า ลองใหม่ได้!' },
+        { name: '🪙 Token คงเหลือของ Party', value: tokenSummary || '—' },
+        { name: '🔄 Token รีเซ็ต', value: 'ทุกวันจันทร์ · แต่ละคนได้ 7 token/สัปดาห์' },
       )
       .setTimestamp();
 
