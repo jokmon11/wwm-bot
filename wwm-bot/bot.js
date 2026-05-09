@@ -1,4 +1,8 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } = require('discord.js');
+const {
+  Client, GatewayIntentBits, EmbedBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle
+} = require('discord.js');
 const fs = require('fs');
 
 const client = new Client({
@@ -6,17 +10,15 @@ const client = new Client({
 });
 
 const DATA_FILE = './data.json';
+const LOG_CHANNEL_NAME = 'wwm-log'; // สร้าง channel ชื่อนี้ใน Discord
 
-// ===== DATA HELPERS =====
+// ===== DATA =====
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) return { tickets: [], results: [], weekTokens: {}, weekKey: getWeekKey() };
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
   catch { return { tickets: [], results: [], weekTokens: {}, weekKey: getWeekKey() }; }
 }
-
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
+function saveData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }
 
 function getWeekKey() {
   const now = new Date();
@@ -31,360 +33,319 @@ async function checkAndResetWeek(data, channel) {
     data.weekKey = cur;
     data.weekTokens = {};
     saveData(data);
-    // แจ้งเตือนใน Discord ถ้ามี channel
     if (channel) {
-      const embed = new EmbedBuilder()
+      await channel.send({ embeds: [new EmbedBuilder()
         .setColor(0x3bc48d)
         .setTitle('🔄 รีเซ็ต Token ประจำสัปดาห์!')
-        .setDescription('สัปดาห์ใหม่เริ่มแล้ว! ทุกคนได้รับ **7 Token** สำหรับสัปดาห์นี้\n\n🪙 Token จะถูกหักเมื่อ **บันทึกผล Run สำเร็จ** เท่านั้น\n🔄 รีเซ็ตใหม่ทุกวันจันทร์')
-        .setFooter({ text: `สัปดาห์ ${cur}` })
-        .setTimestamp();
-      await channel.send({ embeds: [embed] }).catch(() => {});
+        .setDescription('สัปดาห์ใหม่เริ่มแล้ว! ทุกคนได้รับ **7 Token**\n\n🪙 Token หักเมื่อ **บันทึกผล Run** เท่านั้น\n🔄 รีเซ็ตทุกวันจันทร์')
+        .setFooter({ text: `สัปดาห์ ${cur}` }).setTimestamp()
+      ]}).catch(() => {});
     }
   }
   return data;
 }
 
-function formatTime(mins, secs) {
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+// ===== LOG =====
+async function sendLog(guild, embed) {
+  try {
+    const ch = guild.channels.cache.find(c => c.name === LOG_CHANNEL_NAME && c.isTextBased());
+    if (ch) await ch.send({ embeds: [embed] });
+  } catch {}
+}
+function mkLog(color, title, fields) {
+  return new EmbedBuilder().setColor(color).setTitle(title).addFields(fields).setTimestamp();
 }
 
-const CLASS_ICONS = { Warrior: '⚔️', Mage: '🔮', Archer: '🏹', Healer: '💚', Rogue: '🗡️', Paladin: '🛡️' };
-const CLASS_COLORS_HEX = { Warrior: 0xe05c5c, Mage: 0x9b59ff, Archer: 0x3bc48d, Healer: 0x55d4a0, Rogue: 0xf0c040, Paladin: 0x6aaeff };
+// ===== FORMAT =====
+function ft(m, s) { return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`; }
 
-// ===== EMBEDS =====
-function ticketEmbed(ticket) {
-  const members = ticket.members || [];
-  const filled = members.length;
-  const total = ticket.partySize;
+// ===== TICKET EMBED =====
+function ticketEmbed(t) {
+  const filled = t.members.length;
   const statusMap = { open: '🟢 OPEN', full: '🔒 FULL', completed: '✅ DONE', closed: '🔴 CLOSED' };
-  const memberList = members.map(m => `${CLASS_ICONS[m.cls]} **${m.name}** (${m.cls})`).join('\n') || '—';
-  const empty = Array(Math.max(0, total - filled)).fill('— ว่าง —').join('\n');
+  const memberList = t.members.map(m => `👤 **${m.name}**${m.cls ? ` · ${m.cls}` : ''}`).join('\n')
+    + '\n' + Array(Math.max(0, t.partySize - filled)).fill('— ว่าง —').join('\n');
 
   return new EmbedBuilder()
-    .setColor(ticket.status === 'completed' ? 0x3bc48d : ticket.status === 'full' ? 0xf0c040 : 0x1a6aff)
-    .setTitle(`🎫 Ticket #${ticket.id} — ${ticket.creatorName}`)
+    .setColor(t.status === 'completed' ? 0x3bc48d : t.status === 'full' ? 0xf0c040 : 0x1a6aff)
+    .setTitle(`🎫 ${t.partyName || 'Party'} #${t.id}`)
+    .setDescription(`สร้างโดย **${t.creatorName}**`)
     .addFields(
-      { name: '👥 Party Size', value: `${total} คน`, inline: true },
-      { name: '🎯 เวลาเป้าหมาย', value: formatTime(ticket.targetMins, ticket.targetSecs), inline: true },
-      { name: '📅 วันที่', value: ticket.runDate, inline: true },
-      { name: `📋 สมาชิก (${filled}/${total})`, value: memberList + (empty ? '\n' + empty : '') },
-      { name: '📊 สถานะ', value: statusMap[ticket.status] || ticket.status, inline: true },
+      { name: '👥 Party', value: `${t.partySize} คน`, inline: true },
+      { name: '🎯 เป้าหมาย', value: ft(t.targetMins, t.targetSecs), inline: true },
+      { name: '📅 วันที่', value: t.runDate, inline: true },
+      { name: `📋 สมาชิก (${filled}/${t.partySize})`, value: memberList || '—' },
+      { name: '📊 สถานะ', value: statusMap[t.status] || t.status, inline: true },
+      ...(t.note ? [{ name: '📝 Note', value: t.note, inline: true }] : []),
     )
-    .setFooter({ text: `Where Wind Meet Speedrun · สัปดาห์ ${ticket.weekKey}` })
+    .setFooter({ text: `Where Wind Meet · สัปดาห์ ${t.weekKey}` })
     .setTimestamp();
-}
-
-function leaderboardEmbed(results, filterSize) {
-  const medals = ['🥇', '🥈', '🥉'];
-  const filtered = filterSize ? results.filter(r => r.partySize === filterSize) : results;
-  const sorted = [...filtered].sort((a, b) => (a.mins * 60 + a.secs) - (b.mins * 60 + b.secs));
-
-  const rows = sorted.slice(0, 10).map((r, i) => {
-    const medal = medals[i] || `**#${i + 1}**`;
-    const time = formatTime(r.mins, r.secs);
-    const beat = r.beat ? '✅' : '❌';
-    return `${medal} ${beat} \`${time}\` — **${r.runner}** (${r.partySize}P) · ${r.runDate}`;
-  }).join('\n') || 'ยังไม่มีผล';
-
-  return new EmbedBuilder()
-    .setColor(0xf0c040)
-    .setTitle(`🏆 Leaderboard${filterSize ? ` — ${filterSize} คน` : ' — ทั้งหมด'}`)
-    .setDescription(rows)
-    .setFooter({ text: 'Where Wind Meet Speedrun' })
-    .setTimestamp();
-}
-
-function tokenEmbed(data) {
-  const entries = Object.entries(data.weekTokens);
-  const rows = entries.length
-    ? entries.map(([name, used]) => {
-        const bar = '█'.repeat(used) + '░'.repeat(7 - used);
-        return `**${name}** \`${bar}\` ${used}/7`;
-      }).join('\n')
-    : 'ยังไม่มีการใช้ Token สัปดาห์นี้';
-
-  return new EmbedBuilder()
-    .setColor(0x7ecfff)
-    .setTitle(`🪙 Token สัปดาห์ ${data.weekKey}`)
-    .setDescription(rows)
-    .setFooter({ text: 'รีใหม่ทุกต้นสัปดาห์' });
 }
 
 // ===== BUTTONS =====
-function ticketButtons(ticket) {
-  const row = new ActionRowBuilder();
-  if (ticket.status === 'open') {
-    row.addComponents(
-      new ButtonBuilder().setCustomId(`join_${ticket.id}`).setLabel('+ เข้าร่วม').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`result_${ticket.id}`).setLabel('🏁 บันทึกผล').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`close_${ticket.id}`).setLabel('✕ ปิด Ticket').setStyle(ButtonStyle.Danger),
-    );
-  } else if (ticket.status === 'full') {
-    row.addComponents(
-      new ButtonBuilder().setCustomId(`result_${ticket.id}`).setLabel('🏁 บันทึกผล').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`close_${ticket.id}`).setLabel('✕ ปิด').setStyle(ButtonStyle.Danger),
-    );
-  } else {
-    return null;
-  }
-  return row;
+function ticketButtons(t) {
+  if (t.status !== 'open' && t.status !== 'full') return null;
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`join_${t.id}`).setLabel('+ เข้าร่วม').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`leave_${t.id}`).setLabel('↩ ออก').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`result_${t.id}`).setLabel('🏁 บันทึกผล').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`close_${t.id}`).setLabel('✕ ปิด').setStyle(ButtonStyle.Danger),
+  );
+}
+
+// ===== UPDATE TICKET MESSAGE =====
+async function updateMsg(ticket) {
+  if (!ticket.channelId || !ticket.messageId) return;
+  try {
+    const ch = await client.channels.fetch(ticket.channelId);
+    const msg = await ch.messages.fetch(ticket.messageId);
+    const row = ticketButtons(ticket);
+    await msg.edit({ embeds: [ticketEmbed(ticket)], components: row ? [row] : [] });
+  } catch {}
 }
 
 // ===== COMMANDS =====
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  const content = message.content.trim();
-  if (!content.startsWith('!')) return;
-
-  const [cmd, ...args] = content.slice(1).split(' ');
+  if (message.author.bot || !message.content.startsWith('!')) return;
+  const [cmd, ...args] = message.content.trim().slice(1).split(' ');
   let data = loadData();
   data = await checkAndResetWeek(data, message.channel);
 
-  // !create <party:5|10> <target:MM:SS> <date:YYYY-MM-DD> [note]
+  // !create <5|10> <MM:SS> <YYYY-MM-DD> <ชื่อparty> [note]
   if (cmd === 'create') {
-    const usage = '❌ ใช้: `!create <5|10> <MM:SS> <YYYY-MM-DD> [note]`\nตัวอย่าง: `!create 5 30:00 2025-06-01 ต้องการ healer`';
-    if (args.length < 3) return message.reply(usage);
-
+    const usage = '❌ ใช้: `!create <5|10> <MM:SS> <YYYY-MM-DD> <ชื่อparty> [note]`\nเช่น: `!create 5 30:00 2026-05-10 SwordTrial ต้องการ healer`';
+    if (args.length < 4) return message.reply(usage);
     const partySize = parseInt(args[0]);
-    if (![5, 10].includes(partySize)) return message.reply('❌ Party size ต้องเป็น 5 หรือ 10 เท่านั้น');
-
-    const timeParts = args[1].split(':');
-    if (timeParts.length !== 2) return message.reply(usage);
-    const targetMins = parseInt(timeParts[0]);
-    const targetSecs = parseInt(timeParts[1]);
-    if (isNaN(targetMins) || isNaN(targetSecs)) return message.reply(usage);
-
+    if (![5,10].includes(partySize)) return message.reply('❌ ขนาด Party ต้องเป็น 5 หรือ 10');
+    const [tm, ts] = args[1].split(':').map(Number);
+    if (isNaN(tm) || isNaN(ts)) return message.reply(usage);
     const runDate = args[2];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(runDate)) return message.reply('❌ วันที่ต้องอยู่ในรูปแบบ YYYY-MM-DD เช่น 2025-06-01');
-
-    const note = args.slice(3).join(' ');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(runDate)) return message.reply('❌ วันที่ต้องอยู่ในรูปแบบ YYYY-MM-DD');
+    const partyName = args[3].slice(0, 30);
+    const note = args.slice(4).join(' ').slice(0, 50);
     const name = message.author.username;
-
     const id = Date.now().toString().slice(-5);
+
     const ticket = {
-      id, creatorName: name, creatorId: message.author.id,
-      partySize, targetMins, targetSecs, runDate, note,
-      members: [{ name, cls: 'Warrior', userId: message.author.id }],
-      status: 'open', weekKey: data.weekKey,
+      id, partyName, creatorName: name, creatorId: message.author.id,
+      partySize, targetMins: tm, targetSecs: ts, runDate, note,
+      members: [], status: 'open', weekKey: data.weekKey,
       createdAt: new Date().toISOString()
     };
-
     data.tickets.push(ticket);
     saveData(data);
 
-    const embed = ticketEmbed(ticket);
     const row = ticketButtons(ticket);
-    const msg = await message.channel.send({ content: `✅ **${name}** สร้าง Ticket สำเร็จ!`, embeds: [embed], components: row ? [row] : [] });
-
-    // Store message ID for later update
-    data.tickets[data.tickets.length - 1].messageId = msg.id;
-    data.tickets[data.tickets.length - 1].channelId = message.channel.id;
+    const msg = await message.channel.send({ embeds: [ticketEmbed(ticket)], components: row ? [row] : [] });
+    ticket.messageId = msg.id;
+    ticket.channelId = message.channel.id;
     saveData(data);
+
+    await sendLog(message.guild, mkLog(0x1a6aff, '📋 สร้าง Party ใหม่', [
+      { name: 'Party', value: `**${partyName}** #${id}`, inline: true },
+      { name: 'ผู้สร้าง', value: name, inline: true },
+      { name: 'ขนาด / เป้า / วันที่', value: `${partySize}P · ${ft(tm,ts)} · ${runDate}`, inline: false },
+    ]));
     return;
   }
 
-  // !tickets [5|10]
   if (cmd === 'tickets') {
-    const filterSize = args[0] ? parseInt(args[0]) : null;
-    const open = data.tickets.filter(t => t.status === 'open' || t.status === 'full');
-    const filtered = filterSize ? open.filter(t => t.partySize === filterSize) : open;
-
-    if (filtered.length === 0) return message.reply('📋 ไม่มี Ticket ที่เปิดอยู่ตอนนี้ ใช้ `!create` เพื่อสร้างใหม่');
-
-    for (const t of filtered.slice(0, 5)) {
+    const sz = args[0] ? parseInt(args[0]) : null;
+    const list = data.tickets.filter(t => ['open','full'].includes(t.status) && (!sz || t.partySize === sz));
+    if (!list.length) return message.reply('📋 ไม่มี Party ที่เปิดอยู่ ใช้ `!create` เพื่อสร้าง');
+    for (const t of list.slice(0,5)) {
       const row = ticketButtons(t);
       await message.channel.send({ embeds: [ticketEmbed(t)], components: row ? [row] : [] });
     }
     return;
   }
 
-  // !leaderboard [5|10]
   if (cmd === 'leaderboard' || cmd === 'lb') {
-    const filterSize = args[0] ? parseInt(args[0]) : null;
-    return message.channel.send({ embeds: [leaderboardEmbed(data.results, filterSize)] });
+    const sz = args[0] ? parseInt(args[0]) : null;
+    const medals = ['🥇','🥈','🥉'];
+    const filtered = sz ? data.results.filter(r => r.partySize === sz) : data.results;
+    const sorted = [...filtered].sort((a,b) => (a.mins*60+a.secs)-(b.mins*60+b.secs));
+    const rows = sorted.slice(0,10).map((r,i) =>
+      `${medals[i]||`**#${i+1}**`} ${r.beat?'✅':'❌'} \`${ft(r.mins,r.secs)}\` — **${r.runner}** (${r.partySize}P) · ${r.runDate}`
+    ).join('\n') || 'ยังไม่มีผล';
+    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0xf0c040).setTitle(`🏆 Leaderboard${sz?` — ${sz}P`:''}`).setDescription(rows).setTimestamp()] });
   }
 
-  // !tokens
   if (cmd === 'tokens') {
-    return message.channel.send({ embeds: [tokenEmbed(data)] });
+    const entries = Object.entries(data.weekTokens);
+    const rows = entries.length
+      ? entries.map(([n,u]) => `**${n}** \`${'█'.repeat(u)}${'░'.repeat(Math.max(0,7-u))}\` เหลือ ${Math.max(0,7-u)}/7`).join('\n')
+      : 'ยังไม่มีการใช้ Token สัปดาห์นี้';
+    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0x7ecfff)
+      .setTitle(`🪙 Token สัปดาห์ ${data.weekKey}`)
+      .setDescription(rows + '\n\n🔄 Token หักเมื่อบันทึกผล · รีเซ็ตทุกวันจันทร์')] });
   }
 
-  // !help
   if (cmd === 'help') {
-    const embed = new EmbedBuilder()
-      .setColor(0x7ecfff)
+    return message.channel.send({ embeds: [new EmbedBuilder().setColor(0x7ecfff)
       .setTitle('🌬️ Where Wind Meet — คำสั่ง Bot')
       .addFields(
-        { name: '`!create <5|10> <MM:SS> <YYYY-MM-DD> [note]`', value: 'สร้าง Speedrun Ticket\nตัวอย่าง: `!create 5 30:00 2025-06-01 ต้องการ healer`' },
-        { name: '`!tickets [5|10]`', value: 'ดู Ticket ที่เปิดอยู่ทั้งหมด' },
-        { name: '`!leaderboard [5|10]`', value: 'ดู Leaderboard จัดอันดับเวลา' },
-        { name: '`!tokens`', value: 'ดู Token คงเหลือของทุกคนสัปดาห์นี้' },
-        { name: 'ปุ่มใต้ Ticket', value: '**+ เข้าร่วม** → เลือกอาชีพแล้วเข้า party\n**🏁 บันทึกผล** → ใส่เวลาและแนบรูป screenshot\n**✕ ปิด** → ปิด Ticket' },
+        { name: '`!create <5|10> <MM:SS> <วันที่> <ชื่อparty> [note]`', value: 'สร้าง Party\nเช่น: `!create 5 30:00 2026-05-10 SwordTrial ต้องการ healer`' },
+        { name: '`!tickets [5|10]`', value: 'ดู Party ที่เปิดอยู่' },
+        { name: '`!leaderboard [5|10]`', value: 'ดู Leaderboard' },
+        { name: '`!tokens`', value: 'ดู Token คงเหลือ' },
+        { name: '🔘 ปุ่มใต้ Party', value: '**+ เข้าร่วม** → กรอกชื่อ + อาชีพ (ข้อความ)\n**↩ ออก** → ออกจาก party ได้ตลอด\n**🏁 บันทึกผล** → ใส่เวลา + URL รูป\n**✕ ปิด** → ปิด Party (เฉพาะผู้สร้าง)' },
+        { name: `📋 Activity Log`, value: `ดูประวัติทุกกิจกรรมได้ใน **#${LOG_CHANNEL_NAME}**` },
       )
-      .setFooter({ text: 'Token หักเมื่อบันทึกผล Run · รีเซ็ตทุกวันจันทร์ · แต่ละคนได้ 7 token/สัปดาห์' });
-    return message.channel.send({ embeds: [embed] });
+      .setFooter({ text: '🪙 Token หักเมื่อบันทึกผล · รีเซ็ตทุกวันจันทร์ · 7 Token/สัปดาห์' })] });
   }
 });
 
-// ===== BUTTON & MODAL INTERACTIONS =====
+// ===== INTERACTIONS =====
 client.on('interactionCreate', async (interaction) => {
   let data = loadData();
   data = await checkAndResetWeek(data, null);
 
-  // ---- BUTTONS ----
   if (interaction.isButton()) {
     const [action, ticketId] = interaction.customId.split('_');
     const ticket = data.tickets.find(t => t.id === ticketId);
-    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Ticket นี้แล้ว', ephemeral: true });
+    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Party นี้', ephemeral: true });
 
-    // JOIN → show class select
+    // JOIN → modal
     if (action === 'join') {
-      if (ticket.status === 'completed' || ticket.status === 'closed') return interaction.reply({ content: '❌ Ticket นี้ปิดแล้ว', ephemeral: true });
-      const name = interaction.user.username;
-      if (ticket.members.some(m => m.userId === interaction.user.id)) return interaction.reply({ content: '❌ คุณอยู่ใน party นี้แล้ว', ephemeral: true });
+      if (['completed','closed'].includes(ticket.status)) return interaction.reply({ content: '❌ Party ปิดแล้ว', ephemeral: true });
+      if (ticket.members.some(m => m.userId === interaction.user.id)) return interaction.reply({ content: '❌ คุณอยู่ใน party นี้แล้ว กด **↩ ออก** ถ้าอยากออก', ephemeral: true });
       if (ticket.members.length >= ticket.partySize) return interaction.reply({ content: '❌ Party เต็มแล้ว', ephemeral: true });
 
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`selectclass_${ticketId}`)
-        .setPlaceholder('เลือกอาชีพของคุณ')
-        .addOptions([
-          { label: '⚔️ Warrior', value: 'Warrior' },
-          { label: '🔮 Mage', value: 'Mage' },
-          { label: '🏹 Archer', value: 'Archer' },
-          { label: '💚 Healer', value: 'Healer' },
-          { label: '🗡️ Rogue', value: 'Rogue' },
-          { label: '🛡️ Paladin', value: 'Paladin' },
-        ]);
-
-      const row = new ActionRowBuilder().addComponents(select);
-      return interaction.reply({ content: '**เลือกอาชีพของคุณ:**', components: [row], ephemeral: true });
-    }
-
-    // RESULT → show modal
-    if (action === 'result') {
-      const modal = new ModalBuilder()
-        .setCustomId(`resultmodal_${ticketId}`)
-        .setTitle('🏁 บันทึกผล Speedrun');
-
+      const modal = new ModalBuilder().setCustomId(`joinmodal_${ticketId}`).setTitle(`เข้าร่วม ${ticket.partyName || 'Party'}`);
       modal.addComponents(
         new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('runner').setLabel('ชื่อผู้รายงาน').setStyle(TextInputStyle.Short).setRequired(true)
+          new TextInputBuilder().setCustomId('jname').setLabel('ชื่อ In-game ของคุณ').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30)
         ),
         new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('time').setLabel('เวลาที่ทำได้จริง (MM:SS)').setStyle(TextInputStyle.Short).setPlaceholder('25:30').setRequired(true)
+          new TextInputBuilder().setCustomId('jclass').setLabel('อาชีพ / Build (ไม่บังคับ, ≤50 ตัวอักษร)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(50).setPlaceholder('เช่น Warrior Tank, Mage AOE, Healer...')
         ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('imgurl').setLabel('URL รูป Screenshot (ถ้ามี)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('https://...')
-        ),
+      );
+      return interaction.showModal(modal);
+    }
+
+    // LEAVE
+    if (action === 'leave') {
+      if (['completed','closed'].includes(ticket.status)) return interaction.reply({ content: '❌ Party ปิดแล้ว', ephemeral: true });
+      const idx = ticket.members.findIndex(m => m.userId === interaction.user.id);
+      if (idx === -1) return interaction.reply({ content: '❌ คุณไม่ได้อยู่ใน party นี้', ephemeral: true });
+      if (ticket.creatorId === interaction.user.id) return interaction.reply({ content: '❌ ผู้สร้างออกไม่ได้ ใช้ **✕ ปิด** แทน', ephemeral: true });
+      const { name: ln, cls: lc } = ticket.members[idx];
+      ticket.members.splice(idx, 1);
+      ticket.status = ticket.members.length >= ticket.partySize ? 'full' : 'open';
+      saveData(data);
+      await interaction.reply({ content: `↩ **${ln}** ออกจาก **${ticket.partyName || '#'+ticket.id}** แล้ว` });
+      await updateMsg(ticket);
+      await sendLog(interaction.guild, mkLog(0xf0c040, '↩ ออกจาก Party', [
+        { name: 'Party', value: `${ticket.partyName} #${ticket.id}`, inline: true },
+        { name: 'ผู้ออก', value: `${ln}${lc ? ` · ${lc}` : ''}`, inline: true },
+        { name: 'สมาชิกเหลือ', value: `${ticket.members.length}/${ticket.partySize}`, inline: true },
+      ]));
+      return;
+    }
+
+    // RESULT → modal
+    if (action === 'result') {
+      const modal = new ModalBuilder().setCustomId(`resultmodal_${ticketId}`).setTitle('🏁 บันทึกผล Speedrun');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('runner').setLabel('ชื่อผู้รายงาน').setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('time').setLabel('เวลาที่ทำได้จริง (MM:SS)').setStyle(TextInputStyle.Short).setPlaceholder('25:30').setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('imgurl').setLabel('URL รูป Screenshot (ถ้ามี)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('https://...')),
       );
       return interaction.showModal(modal);
     }
 
     // CLOSE
     if (action === 'close') {
-      if (interaction.user.id !== ticket.creatorId) return interaction.reply({ content: '❌ เฉพาะผู้สร้าง Ticket เท่านั้นที่ปิดได้', ephemeral: true });
+      if (interaction.user.id !== ticket.creatorId) return interaction.reply({ content: '❌ เฉพาะผู้สร้างเท่านั้นที่ปิดได้', ephemeral: true });
       ticket.status = 'closed';
       saveData(data);
-      await interaction.reply({ content: `🔴 Ticket #${ticket.id} ปิดแล้ว` });
+      await interaction.reply({ content: `🔴 Party **${ticket.partyName || '#'+ticket.id}** ปิดแล้ว` });
+      await updateMsg(ticket);
+      await sendLog(interaction.guild, mkLog(0xe05c5c, '🔴 ปิด Party', [
+        { name: 'Party', value: `${ticket.partyName} #${ticket.id}`, inline: true },
+        { name: 'ปิดโดย', value: interaction.user.username, inline: true },
+        { name: 'สมาชิกตอนปิด', value: `${ticket.members.length}/${ticket.partySize}`, inline: true },
+      ]));
       return;
     }
   }
 
-  // ---- SELECT CLASS ----
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('selectclass_')) {
+  // JOIN MODAL
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('joinmodal_')) {
     const ticketId = interaction.customId.split('_')[1];
     const ticket = data.tickets.find(t => t.id === ticketId);
-    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Ticket', ephemeral: true });
+    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Party', ephemeral: true });
+    if (ticket.members.some(m => m.userId === interaction.user.id)) return interaction.reply({ content: '❌ คุณอยู่ใน party นี้แล้ว', ephemeral: true });
+    if (ticket.members.length >= ticket.partySize) return interaction.reply({ content: '❌ Party เต็มแล้ว', ephemeral: true });
 
-    const cls = interaction.values[0];
-    const name = interaction.user.username;
+    const jname = interaction.fields.getTextInputValue('jname').trim();
+    const jclass = interaction.fields.getTextInputValue('jclass').trim().slice(0,50) || null;
 
-    ticket.members.push({ name, cls, userId: interaction.user.id });
-    if (ticket.members.length >= ticket.partySize) ticket.status = 'full';
+    ticket.members.push({ name: jname, cls: jclass, userId: interaction.user.id });
+    ticket.status = ticket.members.length >= ticket.partySize ? 'full' : 'open';
     saveData(data);
 
-    await interaction.update({ content: `✅ **${name}** เข้าร่วม party ในฐานะ ${CLASS_ICONS[cls]} ${cls} แล้ว!`, components: [] });
-
-    // Update original ticket message
-    if (ticket.channelId && ticket.messageId) {
-      try {
-        const ch = await client.channels.fetch(ticket.channelId);
-        const msg = await ch.messages.fetch(ticket.messageId);
-        const row = ticketButtons(ticket);
-        await msg.edit({ embeds: [ticketEmbed(ticket)], components: row ? [row] : [] });
-      } catch {}
-    }
+    await interaction.reply({ content: `✅ **${jname}**${jclass ? ` · ${jclass}` : ''} เข้าร่วม **${ticket.partyName}** แล้ว! (${ticket.members.length}/${ticket.partySize})` });
+    await updateMsg(ticket);
+    await sendLog(interaction.guild, mkLog(0x3bc48d, '✅ เข้าร่วม Party', [
+      { name: 'Party', value: `${ticket.partyName} #${ticket.id}`, inline: true },
+      { name: 'ผู้เข้าร่วม', value: `${jname}${jclass ? ` · ${jclass}` : ''}`, inline: true },
+      { name: 'สมาชิก', value: `${ticket.members.length}/${ticket.partySize}`, inline: true },
+    ]));
     return;
   }
 
-  // ---- MODAL SUBMIT (RESULT) ----
+  // RESULT MODAL
   if (interaction.isModalSubmit() && interaction.customId.startsWith('resultmodal_')) {
     const ticketId = interaction.customId.split('_')[1];
     const ticket = data.tickets.find(t => t.id === ticketId);
-    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Ticket', ephemeral: true });
+    if (!ticket) return interaction.reply({ content: '❌ ไม่พบ Party', ephemeral: true });
 
     const runner = interaction.fields.getTextInputValue('runner');
     const timeStr = interaction.fields.getTextInputValue('time');
     const imgUrl = interaction.fields.getTextInputValue('imgurl') || null;
-
     const parts = timeStr.split(':');
-    if (parts.length !== 2 || isNaN(+parts[0]) || isNaN(+parts[1])) {
+    if (parts.length !== 2 || isNaN(+parts[0]) || isNaN(+parts[1]))
       return interaction.reply({ content: '❌ รูปแบบเวลาไม่ถูกต้อง ใช้ MM:SS เช่น 25:30', ephemeral: true });
-    }
-    const mins = parseInt(parts[0]);
-    const secs = parseInt(parts[1]);
-    const actualTotal = mins * 60 + secs;
-    const targetTotal = ticket.targetMins * 60 + ticket.targetSecs;
-    const beat = actualTotal <= targetTotal;
 
-    const result = {
-      ticketId, runner, mins, secs, imgUrl, beat,
-      partySize: ticket.partySize,
-      targetMins: ticket.targetMins, targetSecs: ticket.targetSecs,
-      runDate: ticket.runDate,
-      submittedAt: new Date().toISOString()
-    };
-    data.results.push(result);
+    const mins = parseInt(parts[0]), secs = parseInt(parts[1]);
+    const beat = (mins*60+secs) <= (ticket.targetMins*60+ticket.targetSecs);
+
+    data.results.push({ ticketId, partyName: ticket.partyName, runner, mins, secs, imgUrl, beat, partySize: ticket.partySize, targetMins: ticket.targetMins, targetSecs: ticket.targetSecs, runDate: ticket.runDate, submittedAt: new Date().toISOString() });
     ticket.status = 'completed';
 
-    // หัก Token ทุกคนใน party เมื่อ run สำเร็จ
     const members = ticket.members || [];
-    for (const m of members) {
-      data.weekTokens[m.name] = (data.weekTokens[m.name] || 0) + 1;
-    }
+    for (const m of members) data.weekTokens[m.name] = (data.weekTokens[m.name] || 0) + 1;
     saveData(data);
 
-    // สร้าง token summary
-    const tokenSummary = members.map(m => {
-      const used = data.weekTokens[m.name] || 0;
-      const left = Math.max(0, 7 - used);
-      return `${CLASS_ICONS[m.cls]} **${m.name}** — เหลือ ${left}/7`;
-    }).join('\n');
+    const tokenSummary = members.length
+      ? members.map(m => `**${m.name}**${m.cls ? ` · ${m.cls}` : ''} — เหลือ ${Math.max(0,7-(data.weekTokens[m.name]||0))}/7 🪙`).join('\n')
+      : '—';
 
     const embed = new EmbedBuilder()
       .setColor(beat ? 0x3bc48d : 0xe05c5c)
-      .setTitle(`${beat ? '✅' : '❌'} ผล Speedrun — Ticket #${ticketId}`)
+      .setTitle(`${beat ? '✅ สำเร็จ!' : '❌ ยังไม่ถึงเป้า'} — ${ticket.partyName} #${ticketId}`)
       .addFields(
-        { name: '👤 Runner', value: runner, inline: true },
-        { name: '⏱️ เวลาจริง', value: `\`${formatTime(mins, secs)}\``, inline: true },
-        { name: '🎯 เวลาเป้า', value: `\`${formatTime(ticket.targetMins, ticket.targetSecs)}\``, inline: true },
-        { name: '📊 ผล', value: beat ? '**ทำได้ตามเป้า!** 🎉' : 'ยังไม่ถึงเป้า ลองใหม่ได้!' },
-        { name: '🪙 Token คงเหลือของ Party', value: tokenSummary || '—' },
-        { name: '🔄 Token รีเซ็ต', value: 'ทุกวันจันทร์ · แต่ละคนได้ 7 token/สัปดาห์' },
-      )
-      .setTimestamp();
-
+        { name: '👤 ผู้รายงาน', value: runner, inline: true },
+        { name: '⏱️ เวลาจริง', value: `\`${ft(mins,secs)}\``, inline: true },
+        { name: '🎯 เวลาเป้า', value: `\`${ft(ticket.targetMins,ticket.targetSecs)}\``, inline: true },
+        { name: '📊 ผล', value: beat ? '**ทำได้ตามเป้า!** 🎉' : 'ลองใหม่ได้เลย!' },
+        { name: '🪙 Token คงเหลือ', value: tokenSummary },
+        { name: '🔄 รีเซ็ต Token', value: 'ทุกวันจันทร์ · 7 Token/สัปดาห์' },
+      ).setTimestamp();
     if (imgUrl) embed.setImage(imgUrl);
 
     await interaction.reply({ embeds: [embed] });
+    await updateMsg(ticket);
+    await sendLog(interaction.guild, mkLog(beat ? 0x3bc48d : 0xe05c5c, `🏁 บันทึกผล — ${beat ? '✅ ผ่าน' : '❌ ไม่ผ่าน'}`, [
+      { name: 'Party', value: `${ticket.partyName} #${ticketId}`, inline: true },
+      { name: 'เวลาจริง / เป้า', value: `${ft(mins,secs)} / ${ft(ticket.targetMins,ticket.targetSecs)}`, inline: true },
+      { name: 'สมาชิก', value: members.map(m => m.name).join(', ') || '—', inline: false },
+    ]));
     return;
   }
 });
 
-// ===== LOGIN =====
-client.once('ready', () => {
-  console.log(`✅ Bot พร้อมใช้งาน: ${client.user.tag}`);
-});
-
+client.once('ready', () => console.log(`✅ Bot พร้อมใช้งาน: ${client.user.tag}`));
 client.login(process.env.DISCORD_TOKEN);
